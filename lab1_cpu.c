@@ -13,10 +13,11 @@
 #define LF_SUP
 #ifdef LF_SUP 
 #define TYPE double
+#define SINUS sin
 #else
 #define TYPE float
+#define SINUS sinf
 #endif
-
 
 int main(){
     struct timespec start, end;   
@@ -29,7 +30,7 @@ int main(){
 
     #pragma acc kernels
     for (int i = 0; i < N; ++i){ 
-        arr[i] = sin(tmp * i);
+        arr[i] = SINUS(tmp * i);
     }
 
     #pragma acc parallel loop reduction(+:sum)
