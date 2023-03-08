@@ -17,13 +17,12 @@
 #define CAST std::stof
 #endif
 
-
+//инициализация сетки
 void initArr(TYPE** A,int n){
     A[0][0]=10.0;
     A[0][n-1] = 20.0;
     A[n-1][0]=30.0;
     A[n-1][n-1]=20.0;
-    //#pragma acc update device(A[0:n][0:n])
 
     #pragma acc parallel loop present(A[0:n][0:n])
     for (int i{1};i<n-1;++i){
@@ -60,13 +59,7 @@ void solution(TYPE tol,int iter_max,int n){
             }
         }
 
-        /* #pragma acc parallel loop collapse(2)
-        for (int j {1}; j < n - 1; ++j){
-            for (int i {1}; i < n - 1; ++i){
-                A[j][i] = Anew[j][i];
-            }
-        } */
-
+        //swap без цикла
         TYPE** temp = A;
         A = Anew;
         Anew = temp;    
@@ -90,7 +83,7 @@ void solution(TYPE tol,int iter_max,int n){
 
 int main(int argc, char *argv[]){
     TYPE tol{1e-6};
-    int iter_max{1000000},n{128};
+    int iter_max{1000000},n{128}; //значения для отладки, по умолчанию инициализировать нулями
 
     std::string tmpStr;
     //-t - точность
