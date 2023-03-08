@@ -1,6 +1,7 @@
 #include <iostream>
 #include <cmath>
 #include <string>
+#include <chrono>
 
 //поддержка double
 #define LF_SUP
@@ -81,6 +82,7 @@ void solution(TYPE tol,int iter_max,int n){
 }
 
 int main(int argc, char *argv[]){
+    auto start = std::chrono::high_resolution_clock::now();
     TYPE tol{1e-6};
     int iter_max{1000000},n{128}; //значения для отладки, по умолчанию инициализировать нулями
 
@@ -106,5 +108,8 @@ int main(int argc, char *argv[]){
         } 
     }
     solution(tol,iter_max,n);
+    auto end = std::chrono::high_resolution_clock::now() - start;
+    long long microseconds = std::chrono::duration_cast<std::chrono::microseconds>(end).count();
+    std::cout<<"Time (ms): "<<microseconds/1000<<std::endl;
 }
 
