@@ -1,2 +1,6 @@
 .vscode/
 a.out
+HelloWorld
+cublas_test.cpp
+hello_world.cu
+vec_add.cu
