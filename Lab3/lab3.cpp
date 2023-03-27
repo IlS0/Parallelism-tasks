@@ -13,7 +13,7 @@
 #define MAX fmax
 #define CAST std::stod
 #else
-#define TYPE float
+#define TYPE floatпш
 #define ABS fabsf
 #define MAX fmaxf
 #define CAST std::stof
