@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include "cublas_v2.h"
 
+
 // поддержка double
 #define LF_SUP
 
