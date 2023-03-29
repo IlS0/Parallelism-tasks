@@ -3,7 +3,7 @@
 #include <string>
 #include <cuda_runtime.h>
 #include "cublas_v2.h"
-
+//#include <openacc.h>
 
 // поддержка double
 #define LF_SUP
@@ -20,106 +20,143 @@
 #define CAST std::stof
 #endif
 
+
+#define IDX2C(i, j, ld) (((j)*(ld))+(i))
+
+
 // инициализация сетки
-void initArr(TYPE **A, int n)
+void initArr(TYPE *A, int n)
 {
     #pragma acc kernels
     {
-        A[0][0] = 10.0;
-        A[0][n - 1] = 20.0;
-        A[n - 1][0] = 20.0;
-        A[n - 1][n-1] = 30.0;
+        A[IDX2C(0, 0, n)] = 10.0;
+        A[IDX2C(0, n - 1, n)] = 20.0;
+        A[IDX2C(n - 1, 0, n)] = 20.0;
+        A[IDX2C(n - 1, n - 1, n)] = 30.0;
     }
 
-    #pragma acc parallel loop present(A [0:n] [0:n])
+    
+    #pragma acc parallel loop present(A)
     for (int i{1}; i < n - 1; ++i)
     {
-        A[0][i] = 10 + (i * 10.0 / (n - 1));
-        A[i][0] = 10 + (i * 10.0 / (n - 1));
-        A[n - 1][i] = 20 + (i * 10.0 / (n - 1));
-        A[i][n - 1] = 20 + (i * 10.0 / (n - 1));
+        A[IDX2C(0,i,n)] = 10 + (i * 10.0 / (n - 1));
+        A[IDX2C(i,0,n)] = 10 + (i * 10.0 / (n - 1));
+        A[IDX2C(n-1,i,n)] = 20 + (i * 10.0 / (n - 1));
+        A[IDX2C(i,n-1,n)] = 20 + (i * 10.0 / (n - 1));
     }
 }
 
-void printArr(TYPE **A, int n)
+ void printArr(TYPE *A, int n)
 {
     for (int i {0}; i < n; ++i)
     {
         for (int j {0}; j < n; ++j)
         {
-            #pragma acc kernels present (A[0:n][0:n])
-            printf("%lf ", A[i][j]);
+            #pragma acc kernels present (A)
+            printf("%lf ", A[IDX2C(i,j,n)]);
         }
         std::cout<<std::endl;
     }
     
 }
 
+
 void solution(TYPE tol, int iter_max, int n)
 {
+    //acc_set_device_num(3,acc_device_default);
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    cublasStatus_t status;
+
     TYPE error{1.0};
-    int iter{0};
+    int iter{0},size{n*n};
+    
+    TYPE alpha {-1};
+    int inc {1}, max_idx { 0};
+
+    TYPE *A = new TYPE [size], *Anew = new TYPE [size], *Adif = new TYPE [size];
+    
     bool flag {true};
 
-    TYPE **A = new TYPE *[n], **Anew = new TYPE *[n];
-    for (int i{0}; i < n; ++i)
-    {
-        A[i] = new TYPE[n];
-        Anew[i] = new TYPE[n];
-    }
-
-    #pragma acc enter data copyin(A [0:n] [0:n], error) create(Anew [0:n] [0:n])
+    #pragma acc enter data copyin(error) create(A[0:size],Anew [0:size], Adif[0:size])
 
     initArr(A, n);
     initArr(Anew, n);
-    //printArr(Anew,n);
 
+    //printArr(A,n);
+    //std::cout<<"___________________________"<<std::endl;
+    
     while ( iter < iter_max)
     {
         flag = !(iter % n);
 
-        if (flag){
+        if(flag){
             #pragma acc kernels present(error)
-            error = 0;
-            //#pragma acc update device(error)
+            error = 0; 
         }
 
-        #pragma acc parallel loop collapse(2) present(A, Anew, error) reduction(max: error) async(1)
-        for (int j{1}; j < n - 1; ++j)
-        {
-            for (int i{1}; i < n - 1; ++i)
-            {
-                Anew[j][i] = 0.25 * (A[j][i + 1] + A[j][i - 1] + A[j - 1][i] + A[j + 1][i]);
-                if (flag)
-                    error = MAX(error, ABS(Anew[j][i] - A[j][i]));
+        #pragma acc kernels loop independent collapse(2) present(A, Anew) async(1)
+        for (int j{1}; j < n - 1; ++j){
+            for (int i{1}; i < n - 1; ++i){
+                Anew[IDX2C(j, i, n)] = 0.25 * (A[IDX2C(j, i+1, n)] + A[IDX2C(j, i-1, n)] + A[IDX2C(j-1, i, n)] + A[IDX2C(j+1, i, n)]);
             }
         }
 
         // swap без цикла
-        TYPE **temp = A;
+        TYPE *temp = A;
         A = Anew;
         Anew = temp;
 
-        ++iter;
-        if (flag){
-            #pragma acc update host(error) wait(1)
-            if (error <= tol)
+        if(flag){  
+            #pragma acc data present(A, Anew, Adif) wait(1)
+            {
+                #pragma acc host_data use_device(A, Anew, Adif)
+                {
+                    status = cublasDcopy(handle, size, Anew, inc, Adif, inc);
+                    if(status != CUBLAS_STATUS_SUCCESS) {
+                        std::cerr << "copy error" << std::endl; 
+                        exit(30);
+                    }
+
+                    status = cublasDaxpy(handle, size, &alpha, A, inc, Adif, inc);
+                    if(status != CUBLAS_STATUS_SUCCESS) {
+                        std::cerr << "sum error" << std::endl;
+                        exit(40);
+                    }
+                    
+                    status = cublasIdamax(handle, size, Adif, inc, &max_idx);
+                    if(status != CUBLAS_STATUS_SUCCESS) {
+                        std::cerr << "abs max error" << std::endl; 
+                        exit(41);
+                    }
+                
+                    //std::cout<<error<<std::endl;
+                    #pragma acc kernels present(error)
+                    error = ABS(Adif[max_idx - 1]);	
+                    
+                }   
+            }
+
+            #pragma acc update host(error)
+            if (error <= tol){
                 break;
+            }
         }
+        
+        
+        ++iter;   
     }
+
     #pragma acc wait(1)
 
-    #pragma acc exit data delete (A [0:n] [0:n], error, Anew [0:n] [0:n])
 
     std::cout << "Iterations: " << iter << std::endl<< "Error: " << error << std::endl;
+    #pragma acc exit data delete (A [0:size], Anew [0:size], Adif[0:size],error)
 
-    for (int i{0}; i < n; i++)
-    {
-        delete[] A[i];
-        delete[] Anew[i];
-    }
+    cublasDestroy(handle);
     delete[] A;
     delete[] Anew;
+    delete[] Adif;
 }
 
 int main(int argc, char *argv[])

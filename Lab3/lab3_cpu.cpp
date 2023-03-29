@@ -25,7 +25,7 @@ void initArr(TYPE** A,int n){
     A[n-1][0]=30.0;
     A[n-1][n-1]=20.0;
 
-    #pragma acc parallel loop present(A[0:n][0:n])
+
     for (int i{1};i<n-1;++i){
         A[0][i]=10+((A[0][n-1] - A[0][0])/ (n-1))*i;
         A[i][0]=10+((A[n-1][0] - A[0][0])/ (n-1))*i;
@@ -43,16 +43,14 @@ void solution(TYPE tol,int iter_max,int n){
         Anew[i] = new TYPE[n];
     }
 
-    #pragma acc enter data copyin(A [0:n] [0:n],error) create (Anew[0:n][0:n])
+   
 
     initArr(A,n);
     initArr(Anew,n);
         
     while (error > tol && iter < iter_max){
         error = 0.0;
-        #pragma acc update device(error)
-
-        #pragma acc parallel loop collapse(2) present(A[0:n][0:n]) reduction(max : error)
+       
         for (int j {1}; j < n - 1; ++j){
             for (int i {1}; i < n - 1; ++i){
                 Anew[j][i] = 0.25 * (A[j][i + 1] + A[j][i - 1] + A[j - 1][i] + A[j + 1][i]);
@@ -66,10 +64,10 @@ void solution(TYPE tol,int iter_max,int n){
         Anew = temp;    
 
         ++iter;
-        #pragma acc update host(error)
+       
     }
 
-    #pragma acc exit data delete(A [0:n] [0:n],error,Anew [0:n] [0:n])
+    
     
     std::cout<<"Iterations: "<<iter<<std::endl<<"Error: "<<error<<std::endl;
 
