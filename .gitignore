@@ -1,7 +1,4 @@
 .vscode/
 *.out
-cublas_test.cpp
-hello_world.cu
-HelloWorld
-vec_add.cu
+Seminars/
 *.nsys-rep
