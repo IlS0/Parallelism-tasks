@@ -1,2 +1,7 @@
 .vscode/
-a.out
+*.out
+cublas_test.cpp
+hello_world.cu
+HelloWorld
+vec_add.cu
+*.nsys-rep
