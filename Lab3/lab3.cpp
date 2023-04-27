@@ -3,6 +3,7 @@
 #include <string>
 #include <cuda_runtime.h>
 #include "cublas_v2.h"
+#include <chrono>
 //#include <openacc.h>
 
 // поддержка double
@@ -20,13 +21,14 @@
 #define CAST std::stof
 #endif
 
-
+//индексация по фортрану
 #define IDX2C(i, j, ld) (((j)*(ld))+(i))
 
 
-// инициализация сетки
+// функция инициализации сетки
 void initArr(TYPE *A, int n)
 {
+    //заполнение углов сетки на гпу
     #pragma acc kernels
     {
         A[IDX2C(0, 0, n)] = 10.0;
@@ -35,7 +37,7 @@ void initArr(TYPE *A, int n)
         A[IDX2C(n - 1, n - 1, n)] = 30.0;
     }
 
-    
+    //заполнение краёв сетки
     #pragma acc parallel loop present(A)
     for (int i{1}; i < n - 1; ++i)
     {
@@ -46,6 +48,7 @@ void initArr(TYPE *A, int n)
     }
 }
 
+//функция печати массива на гпу
  void printArr(TYPE *A, int n)
 {
     for (int i {0}; i < n; ++i)
@@ -60,26 +63,36 @@ void initArr(TYPE *A, int n)
     
 }
 
-
+//основной цикл программы
 void solution(TYPE tol, int iter_max, int n)
 {
     //acc_set_device_num(3,acc_device_default);
+
+    //указатель на структуру с контекстом кубласа
     cublasHandle_t handle;
     cublasCreate(&handle);
     cublasStatus_t status;
 
+    //текущая ошибка, счетчик итераций, размер(площадь) сетки
     TYPE error{1.0};
-    int iter{0},size{n*n};
+    int iter{0},size{n*n}; 
     
+
+    //alpha - скаляр для вычитания
+    //inc - шаг инкремента
+    //max_idx - индекс максимального элемента
     TYPE alpha {-1};
     int inc {1}, max_idx { 0};
 
-    TYPE *A = new TYPE [size], *Anew = new TYPE [size], *Adif = new TYPE [size];
+    //матрицы
+    TYPE *A = new TYPE [size], *Anew = new TYPE [size], *Atmp = new TYPE [size];
     
-    bool flag {true};
+    bool flag {true}; // флаг для обновления значения ошибки на хосте
 
-    #pragma acc enter data copyin(error) create(A[0:size],Anew [0:size], Adif[0:size])
+    #pragma acc enter data copyin(error) create(A[0:size],Anew [0:size], Atmp[0:size])
 
+
+    //инициализация сеток
     initArr(A, n);
     initArr(Anew, n);
 
@@ -88,13 +101,17 @@ void solution(TYPE tol, int iter_max, int n)
     
     while ( iter < iter_max)
     {
+
         flag = !(iter % n);
 
+        //зануление ошибки на гпу
         if(flag){
             #pragma acc kernels present(error)
             error = 0; 
         }
 
+        
+        //среднее по соседним элементам
         #pragma acc kernels loop independent collapse(2) present(A, Anew) async(1)
         for (int j{1}; j < n - 1; ++j){
             for (int i{1}; i < n - 1; ++i){
@@ -107,36 +124,41 @@ void solution(TYPE tol, int iter_max, int n)
         A = Anew;
         Anew = temp;
 
+        //флаг для обновления ошибки
         if(flag){  
-            #pragma acc data present(A, Anew, Adif) wait(1)
+            #pragma acc data present(A, Anew, Atmp) wait(1)
             {
-                #pragma acc host_data use_device(A, Anew, Adif)
+                #pragma acc host_data use_device(A, Anew, Atmp)
                 {
-                    status = cublasDcopy(handle, size, Anew, inc, Adif, inc);
+                    //копируем Anew в Atmp
+                    status = cublasDcopy(handle, size, Anew, inc, Atmp, inc);
                     if(status != CUBLAS_STATUS_SUCCESS) {
                         std::cerr << "copy error" << std::endl; 
-                        exit(30);
+                        exit(1);
                     }
 
-                    status = cublasDaxpy(handle, size, &alpha, A, inc, Adif, inc);
+                    //умножаем вектор на скаляр и + вектор
+                    status = cublasDaxpy(handle, size, &alpha, A, inc, Atmp, inc);
                     if(status != CUBLAS_STATUS_SUCCESS) {
                         std::cerr << "sum error" << std::endl;
-                        exit(40);
+                        exit(1);
                     }
                     
-                    status = cublasIdamax(handle, size, Adif, inc, &max_idx);
+                    //получаем индекс максимального абсолютного значения в матрице
+                    status = cublasIdamax(handle, size, Atmp, inc, &max_idx);
                     if(status != CUBLAS_STATUS_SUCCESS) {
                         std::cerr << "abs max error" << std::endl; 
-                        exit(41);
+                        exit(1);
                     }
                 
                     //std::cout<<error<<std::endl;
                     #pragma acc kernels present(error)
-                    error = ABS(Adif[max_idx - 1]);	
+                    error = ABS(Atmp[max_idx - 1]);	
                     
                 }   
             }
-
+            
+            //обновление ошибки на хосте. сравнение с точностью
             #pragma acc update host(error)
             if (error <= tol){
                 break;
@@ -147,16 +169,20 @@ void solution(TYPE tol, int iter_max, int n)
         ++iter;   
     }
 
+    //синъронизируемся
     #pragma acc wait(1)
 
 
     std::cout << "Iterations: " << iter << std::endl<< "Error: " << error << std::endl;
-    #pragma acc exit data delete (A [0:size], Anew [0:size], Adif[0:size],error)
+    
+    //очистка памти гпу
+    #pragma acc exit data delete (A [0:size], Anew [0:size], Atmp[0:size],error)
 
+    //
     cublasDestroy(handle);
     delete[] A;
     delete[] Anew;
-    delete[] Adif;
+    delete[] Atmp;
 }
 
 int main(int argc, char *argv[])
@@ -165,6 +191,7 @@ int main(int argc, char *argv[])
     TYPE tol{1e-6};
     int iter_max{1000000}, n{128}; // значения для отладки, по умолчанию инициализировать нулями
 
+    //парсинг командной строки
     std::string tmpStr;
     //-t - точность
     //-n - размер сетки
@@ -191,5 +218,9 @@ int main(int argc, char *argv[])
         }
     }
 
-    solution(tol, iter_max, n);
+    auto start = std::chrono::high_resolution_clock::now();
+    solution(tol,iter_max,n);
+    auto end = std::chrono::high_resolution_clock::now() - start;
+    long long microseconds = std::chrono::duration_cast<std::chrono::microseconds>(end).count();
+    std::cout<<"Time (ms): "<<microseconds/1000<<std::endl;
 }
