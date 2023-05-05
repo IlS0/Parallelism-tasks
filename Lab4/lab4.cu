@@ -1,12 +1,11 @@
 #include <iostream>
 #include <cmath>
+#include <chrono>
 
 #include <cuda_runtime.h>
 #include <cuda.h> 
 #include <cub/cub.cuh>
-#include <cub/block/block_reduce.cuh>
-//#include "sub.cuh" 
-#include <chrono>
+#include <cub/block/block_reduce.cuh> 
 
 
 // поддержка double
@@ -18,7 +17,7 @@
 #define MAX fmax
 #define CAST std::stod
 #else
-#define TYPE floatпш
+#define TYPE float
 #define ABS fabsf
 #define MAX fmaxf
 #define CAST std::stof
@@ -29,7 +28,7 @@
 
 
 // функция инициализации сетки
-void initArr(TYPE *A, int n)
+void initArr(TYPE *A, const int n)
 {
     //заполнение углов сетки
     A[IDX2C(0, 0, n)] = 10.0;
@@ -46,11 +45,10 @@ void initArr(TYPE *A, int n)
         A[IDX2C(n-1,i,n)] = 20 + (i * 10.0 / (n - 1));
         A[IDX2C(i,n-1,n)] = 20 + (i * 10.0 / (n - 1));
     }
-  
 }
 
-//функция печати массива на гпу
- void printArr(TYPE *A, int n)
+//функция печати массива
+ void printArr(TYPE *A, const int n)
 {
     for (int i {0}; i < n; ++i)
     {
@@ -99,68 +97,82 @@ __global__ void reduceBlock(const double *A, const double *Anew, const int n, do
 
 
 //основной цикл программы
-void solution(TYPE tol, int iter_max, int n)
+void solution(const TYPE tol, const int iter_max, const int n)
 {
-    //acc_set_device_num(3,acc_device_default);
-
-
-
     //текущая ошибка, счетчик итераций, размер(площадь) сетки
-    TYPE error{1.0};
+    TYPE error {1.0};
     int iter{0},size{n*n}; 
     
-
-    //alpha - скаляр для вычитания
-    //inc - шаг инкремента
-    //max_idx - индекс максимального элемента
-    TYPE alpha {-1};
-    int inc {1}, max_idx { 0};
-
     //матрицы
-    TYPE *A = new TYPE [size], *Anew = new TYPE [size], *Atmp = new TYPE [size];
+    TYPE *A = new TYPE [size], *Anew = new TYPE [size];
     
-    bool flag {true}; // флаг для обновления значения ошибки на хосте
-
     //инициализация сеток
     initArr(A, n);
     initArr(Anew, n);
+
+    bool flag {true}; // флаг для обновления значения ошибки на хосте
+
+    //printArr(A,n);
+    //std::cout<<"___________________________"<<std::endl;
+
+    //размерность
+    int* dev_n;
+    cudaMalloc(&dev_n, sizeof(int));
+    cudaMemcpy(dev_n, &n, sizeof(int), cudaMemcpyHostToDevice);
+
+    //ошибка
+    TYPE* dev_error;
+    cudaMalloc(&dev_error, sizeof(int));
+    cudaMemcpy(dev_error, &error, sizeof(int), cudaMemcpyHostToDevice);
 
     //указатели на массивы, которые будут лежать на девайсе
     double *dev_A, *dev_Anew, *dev_Atmp;
 
     //выделение памяти на видеокарте под массивы
-    cudaMalloc(&dev_A,size*sizeof(TYPE));
-    cudaMalloc(&dev_Anew,size*sizeof(TYPE));
-    //cudaMalloc(&dev_Atmp,size*sizeof(TYPE));
-
-
     //копирование массивов на видеокарту 
+    cudaMalloc(&dev_A,size*sizeof(TYPE));
     cudaMemcpy(dev_A, A, size, cudaMemcpyHostToDevice);
+
+    cudaMalloc(&dev_Anew,size*sizeof(TYPE));
     cudaMemcpy(dev_Anew, Anew, size, cudaMemcpyHostToDevice);
+    
 
     //определение количество потоков на блок
     dim3 threadPerBlock = dim3(32,32); 
     //определение количество блоков на сетку
     dim3 blocksPerGrid = dim3((n + 31) / 32, (n+31)/32);
 
-    //printArr(A,n);
-    //std::cout<<"___________________________"<<std::endl;
     
+    // количество блоков редукции
+    int num_blocks_reduce {(size + 255) / 256}; 
+    // выделяем память под ошибку блочной редукции
+    double *error_reduction;
+    cudaMalloc(&error_reduction, sizeof(double) * num_blocks_reduce);
+
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+    //cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, subs, error, size);
+    cudaMalloc(&d_temp_storage, temp_storage_bytes);
+    double* tmp_err = (double*)malloc(sizeof(double)); 
+
+
+
     while (error > tol && iter < iter_max)
     {
         flag = !(iter % n);
 
         // меняем местами, чтобы не делать swap с доп переменной. работает быстрее
-        Step<<<blocksPerGrid, threadPerBlock>>>(A, Anew, n_d); 
-        Step<<<blocksPerGrid, threadPerBlock>>>(Anew, A, n_d); 
+        Step<<<blocksPerGrid, threadPerBlock>>>(dev_A, dev_Anew, dev_n); 
+        Step<<<blocksPerGrid, threadPerBlock>>>(dev_Anew, dev_A, dev_n); 
 
-        if(flag){
-            //reduceBlock<<<num_blocks_reduce, THREADS_PER_BLOCK_REDUCE>>>(F, Fnew, size, error_reduction); // по блочно проходим редукцией
-            //cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, error_reduction, error, num_blocks_reduce); // проходим редукцией по всем блокам
+        //if(flag){
+            // поблочно проходим редукцией
+            reduceBlock<<<num_blocks_reduce, 255>>>(dev_A, dev_Anew, size, error_reduction); 
+            // проходим редукцией по всем блокам
+            cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, error_reduction, dev_error, num_blocks_reduce); 
             ////обновление ошибки на хосте 
-            //cudaMemcpy(tmp_err, error, sizeof(double), cudaMemcpyDeviceToHost);
-            
-        }
+            cudaMemcpy(tmp_err, dev_error, sizeof(double), cudaMemcpyDeviceToHost);      
+        //}
         ++iter;   
     }
 
@@ -169,16 +181,17 @@ void solution(TYPE tol, int iter_max, int n)
     
     cudaFree(dev_A);
     cudaFree(dev_Anew);
-    //cudaFree(dev_Atmp);
+    cudaFree(dev_n);
+    cudaFree(dev_error);
+    cudaFree(error_reduction);
+    cudaFree(d_temp_storage);
 
     delete[] A;
     delete[] Anew;
-    delete[] Atmp;
 }
 
 int main(int argc, char *argv[])
 {
-    
     TYPE tol{1e-6};
     int iter_max{1000000}, n{128}; // значения для отладки, по умолчанию инициализировать нулями
 
