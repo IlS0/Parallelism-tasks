@@ -148,6 +148,7 @@ void solution(const TYPE tol, const int iter_max, const int n)
 
     CUDA_CHECK(cudaMalloc(&dev_Atmp, size * sizeof(TYPE)));
 
+
     TYPE *temp_storage = nullptr;
     uint64_t temp_storage_bytes{0};
 
@@ -157,23 +158,40 @@ void solution(const TYPE tol, const int iter_max, const int n)
     // Выделение памяти под буфер
     CUDA_CHECK(cudaMalloc(&temp_storage, temp_storage_bytes));
 
+    // Граф
+    cudaGraph_t graph;
+    cudaGraphExec_t instance;
+
+    cudaStream_t stream;
+    CUDA_CHECK(cudaStreamCreate(&stream));
+
+    bool isGraphCreated {false};
+
     while (*error > tol && iter < iter_max)
     {
-
-        
         flag = !(iter % n);
 
-        // меняем местами, чтобы не делать swap с доп переменной. работает быстрее
-        calcAverage<<<blocksPerGrid, threadPerBlock>>>(dev_A, dev_Anew, n);
-        calcAverage<<<blocksPerGrid, threadPerBlock>>>(dev_Anew, dev_A, n);
+        if (!isGraphCreated){
+            CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+            
+            // меняем местами, чтобы не делать swap с доп переменной. работает быстрее
+            calcAverage<<<blocksPerGrid, threadPerBlock,0,stream>>>(dev_A, dev_Anew, n);
+            calcAverage<<<blocksPerGrid, threadPerBlock,0,stream>>>(dev_Anew, dev_A, n);
 
+            CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
+            CUDA_CHECK(cudaGraphInstantiate(&instance, graph, NULL, NULL, 0));
+            isGraphCreated=true;
+        }
+
+
+        cudaGraphLaunch(instance, stream);
 
         if (flag)
         {
             //вычитание матриц
-            calcMatrDiff<<<blocksPerGrid, threadPerBlock>>>(dev_A, dev_Anew, dev_Atmp, n);
+            calcMatrDiff<<<blocksPerGrid, threadPerBlock,0,stream>>>(dev_A, dev_Anew, dev_Atmp, n);
             //редукция
-            cub::DeviceReduce::Max(temp_storage, temp_storage_bytes, dev_Atmp, dev_error, size);
+            cub::DeviceReduce::Max(temp_storage, temp_storage_bytes, dev_Atmp, dev_error, size,stream);
             //обновление ошибки на хосте
             CUDA_CHECK(cudaMemcpy(error, dev_error, sizeof(TYPE), cudaMemcpyDeviceToHost));
         }
@@ -189,6 +207,11 @@ void solution(const TYPE tol, const int iter_max, const int n)
     cudaFree(dev_Anew);
     cudaFree(dev_Atmp);
     cudaFree(dev_error);
+
+
+    CUDA_CHECK(cudaStreamDestroy(stream));
+    //CUDA_CHECK(cudaStreamDestroy(memory_stream));
+    CUDA_CHECK(cudaGraphDestroy(graph));
 }
 
 int main(int argc, char *argv[])
