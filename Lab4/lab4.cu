@@ -120,7 +120,7 @@ void solution(const TYPE tol, const int iter_max, const int n)
     // printArr(A,n);
     // std::cout<<"___________________________"<<std::endl;
 
-    cudaSetDevice(1);
+    cudaSetDevice(0);
 
     // определение количества потоков на блок
     int threads_in_block{32};
