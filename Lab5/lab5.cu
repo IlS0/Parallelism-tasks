@@ -1,11 +1,16 @@
 #include <iostream>
 #include <cmath>
 #include <chrono>
+#include <stdlib.h>
 
 #include <cuda_runtime.h>
 #include <cuda.h>
 #include <cub/cub.cuh>
-#include "mpi.h"
+
+
+// индексация
+#define IDX2C(i, j, ld) (((j) * (ld)) + (i))
+
 
 // поддержка double
 #define LF_SUP
@@ -22,19 +27,51 @@
 #define CAST std::stof
 #endif
 
-// индексация
-#define IDX2C(i, j, ld) (((j) * (ld)) + (i))
 
-// Макрос проверки статуса операции CUDA
-#define CUDA_CHECK(err)                                                        \
-    {                                                                          \
-        cudaError_t err_ = (err);                                              \
-        if (err_ != cudaSuccess)                                               \
-        {                                                                      \
-            std::printf("CUDA error %d at %s:%d\n", err_, __FILE__, __LINE__); \
-            throw std::runtime_error("CUDA error");                            \
-        }                                                                      \
-    }
+//Фукнция для вычисления среднего значения пятиточечным шаблоном по соседним элементам
+//для граничных значений сетки
+__global__ void calcAverageBounds(const TYPE *A, TYPE *Anew, const int n, const int sizePerGpu)
+{
+    // вычисление ячейки
+	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+	unsigned int j = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // проверка границ
+	if(i <= n - 2 && i > 0){
+        // среднее по соседним элементам
+		Anew[1 * n + i] = 0.25 * (A[1 * n + i - 1] + A[(1 - 1) * n + i] + A[(1 + 1) * n + i] + A[1 * n + i + 1]);
+		Anew[(sizePerGpu - 2) * n + j] = 0.25 * (A[(sizePerGpu - 2) * n + j - 1] + A[((sizePerGpu - 2) - 1) * n + j] + A[((sizePerGpu - 2) + 1) * n + j] + A[(sizePerGpu - 2) * n + j + 1]);
+	}
+}
+
+//фукнция для вычисления среднего значения пятиточечным шаблоном по соседним элементам 
+//для внутренних значений сетки
+__global__ void calcAverageInnards(const TYPE *A, TYPE *Anew,const int n, const int sizePerGpu)
+{
+    // вычисление ячейки
+	int j = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // проверка границ
+	if(j >= 1 && i >= 2 && j <= n - 2 && i <= sizePerGpu - 2){
+       // среднее по соседним элементам
+		Anew[i*n + j] = 0.25 * (A[i * n + j - 1] + A[i * n + j + 1] + A[(i - 1) * n + j] + A[(i + 1) * n + j]);
+	}
+}
+
+//фукнция, вычисляющая разность двух матриц
+__global__ void calcMatrDiff(const TYPE *A, const TYPE *Anew, TYPE *Atmp,const int n,const int sizePerGpu){
+    // вычисление ячейки
+	unsigned int j = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int i = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // проверка границ
+	if(j > 0 && i > 0 && j < n - 1 && i < sizePerGpu - 1){
+        // среднее по соседним элементам
+		Atmp[i * n + j] = ABS(Anew[i * n + j] - A[i * n + j]);
+	}
+}
+
 
 // функция инициализации сетки
 void initArr(TYPE *A, const int n)
@@ -44,11 +81,6 @@ void initArr(TYPE *A, const int n)
     A[IDX2C(0, n - 1, n)] = 20.0;
     A[IDX2C(n - 1, 0, n)] = 20.0;
     A[IDX2C(n - 1, n - 1, n)] = 30.0;
-
-    //A[0]
-    //A[(n-1)*n]
-    //A[n-1]
-    //A[n*n-1]
 
     // заполнение краёв сетки
     for (int i{1}; i < n - 1; ++i)
@@ -74,180 +106,138 @@ void printArr(TYPE *A, const int n)
     }
 }
 
-// Шаг алгоритма
-//фукнция для вычисления среднего значения пятиточечным шаблоном по соседним элементам
-__global__ void calcAverage(const TYPE *A, TYPE *Anew, const int dev_n)
-{
-    // вычисление ячейки
-    unsigned int j = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int i = blockIdx.y * blockDim.y + threadIdx.y;
-    // проверка границ
-    if (j == 0 || i == 0 || i >= dev_n - 1 || j >= dev_n - 1) return;
-    // среднее по соседним элементам
-    Anew[IDX2C(j, i, dev_n)] = 0.25 * (A[IDX2C(j, i + 1, dev_n)] + A[IDX2C(j, i - 1, dev_n)] + A[IDX2C(j - 1, i, dev_n)] + A[IDX2C(j + 1, i, dev_n)]);
-}
-
-
-// //Фукнция для вычисления среднего значения пятиточечным шаблоном по соседним элементам
-// //для граничных значений сетки
-// __global__ void calcAverageBounds(const TYPE * A, double* Anew, const int n, const int n)
-// {
-//     // вычисление ячейки
-//     //поменял местами i j
-// 	unsigned int j = blockIdx.x * blockDim.x + threadIdx.x;
-//     unsigned int i = blockIdx.y * blockDim.y + threadIdx.y;
-
-//     // проверка границ
-//     if(i > n-1 || i <= 0) return;
-
-//     // среднее по соседним элементам
-// 	//Anew[1 * size + i] = 0.25 * (A[1 * size + i - 1] + A[(1 - 1) * size + i] + A[(1 + 1) * size + i] + A[1 * size + i + 1]);
-// 	// Anew[IDX2C(j, i, dev_n)] = 0.25 * (A[IDX2C(j, i + 1, dev_n)] + A[IDX2C(j, i - 1, dev_n)] + A[IDX2C(j - 1, i, dev_n)] + A[IDX2C(j + 1, i, dev_n)]);
-//     //Anew[(sizePerGpu - 2) * size + j] = 0.25 * (A[(sizePerGpu - 2) * size + j - 1] + A[((sizePerGpu - 2) - 1) * size + j] + A[((sizePerGpu - 2) + 1) * size + j] + A[(sizePerGpu - 2) * size + j + 1]);
-// }
-
-// //фукнция для вычисления среднего значения пятиточечным шаблоном по соседним элементам 
-// //для внутренних значений сетки
-// __global__ void calcAverageInnards(const TYPE * A, double* Anew, const int n, const int sizePerGpu)
-// {
-//     // вычисление ячейки
-// 	unsigned int j = blockIdx.x * blockDim.x + threadIdx.x;
-//     unsigned int i = blockIdx.y * blockDim.y + threadIdx.y;
-
-//     // проверка границ
-//     if (j < 1 || i < 1 || i > n - 1 || j > n - 1) return;
-
-//     // среднее по соседним элементам
-//     //Anew[i*size + j] = 0.25 * (A[i * size + j - 1] + A[i * size + j + 1] + A[(i - 1) * size + j] + A[(i + 1) * size + j]);	
-//     Anew[IDX2C(j, i, n)] = 0.25 * (A[IDX2C(j, i + 1, n)] + A[IDX2C(j, i - 1, n)] + A[IDX2C(j - 1, i, n)] + A[IDX2C(j + 1, i, n)]);
-// }
-
-
-// //фукнция, вычисляющая разность двух матриц
-__global__ void calcMatrDiff(const TYPE *A, const TYPE *Anew, TYPE *Atmp,const int n)
-{
-     // вычисление ячейки
-     unsigned int j = blockDim.x * blockIdx.x + threadIdx.x;
-     unsigned int i = blockDim.y * blockIdx.y + threadIdx.y;
-     // проверка границ
-     if (j == 0 || i == 0 || i >= n - 1 || j >= n - 1) return;
-
-     //вычисление индекса
-    uint32_t idx = IDX2C(j, i, n);
-
-     //результат разности двух матриц
-     Atmp[idx] = ABS(Anew[idx] - A[idx]);
-}
 
 // основной цикл программы
-void solution(const TYPE tol, const int iter_max, const int n, const int rank, const int rankNumber)
+void solution(const TYPE tol, const int iter_max, const int n, const int rank, const int nRanks)
 {
-    //std::cout<<"rank: "<<rank<<" size: "<<rankNumber<<std::endl;
-    //return;
-
-
-    cudaSetDevice(rank);
+    // выбор гпу
+	cudaSetDevice(rank);
 
     // текущая ошибка, счетчик итераций, размер(площадь) сетки
-    TYPE *error;
-    CUDA_CHECK(cudaMallocHost(&error, sizeof(TYPE)));
-    *error = 1.0;
+    TYPE error {1.0};
     int iter{0}, size{n * n};
 
-    // матрицы
-    TYPE *A;
-    CUDA_CHECK(cudaMallocHost(&A, size * sizeof(TYPE)));
-
-    // инициализация сеток
-    initArr(A, n);
-    //initArr(Anew, n);
     bool flag{true}; // флаг для обновления значения ошибки на хосте
 
-    // printArr(A,n);
-    // std::cout<<"___________________________"<<std::endl;
+    // матрицы
+	TYPE *A;
+    cudaMallocHost(&A, size * sizeof(TYPE));
 
-    //cudaSetDevice(0);
+	size_t sizeForOne {n / nRanks}, beginIdx {n / nRanks * rank};
+    
+    // инициализация сеток
+    initArr(A,n);
 
-    // определение количества потоков на блок
-    int threads_in_block{32};
-    dim3 threadPerBlock = dim3(threads_in_block, threads_in_block);
 
-    // определение количества блоков на сетку
-    int blocks_in_grid = ceil((TYPE)n / threads_in_block);
-    dim3 blocksPerGrid = dim3(blocks_in_grid, blocks_in_grid);
+	if(nRanks!=1){
+		if (rank != 0 && rank != nRanks - 1) 
+            sizeForOne += 2;
+		else 
+            sizeForOne += 1;   
+	 }
 
-    // ошибка
-    TYPE *dev_error;
-    CUDA_CHECK(cudaMalloc(&dev_error, sizeof(TYPE)));
-    CUDA_CHECK(cudaMemcpy(dev_error, error, sizeof(TYPE), cudaMemcpyHostToDevice));
 
     // указатели на массивы, которые будут лежать на девайсе
     TYPE *dev_A, *dev_Anew, *dev_Atmp;
 
     // выделение памяти на видеокарте под массивы
     // копирование массивов на видеокарту
-    CUDA_CHECK(cudaMalloc(&dev_A, size * sizeof(TYPE)));
-    CUDA_CHECK(cudaMemcpy(dev_A, A, size * sizeof(TYPE), cudaMemcpyHostToDevice));
+	cudaMalloc((void**)&dev_A, n * sizeForOne * sizeof(TYPE));
+	cudaMalloc((void**)&dev_Anew, n * sizeForOne * sizeof(TYPE));
+	cudaMalloc((void**)&dev_Atmp, n * sizeForOne * sizeof(TYPE));
 
-    CUDA_CHECK(cudaMalloc(&dev_Anew, size * sizeof(TYPE)));
-    CUDA_CHECK(cudaMemcpy(dev_Anew, dev_A, size * sizeof(TYPE), cudaMemcpyDeviceToDevice));
+	size_t offset = (rank != 0) ? n : 0;
+ 	cudaMemcpy(dev_A, (A + (beginIdx * n) - offset), sizeof(TYPE) * n * sizeForOne, cudaMemcpyHostToDevice);
+	cudaMemcpy(dev_Anew, dev_A + (beginIdx * n) - offset, sizeof(TYPE) * n * sizeForOne, cudaMemcpyDeviceToDevice);
 
-    CUDA_CHECK(cudaMalloc(&dev_Atmp, size * sizeof(TYPE)));
+	// создаем потоки и назначаем приоритет
+	int leastPriority {0}, greatestPriority {0};
+    // Получаем диапазон приоритетов потоков устройства CUDA
+	cudaStream_t stream_boundaries, stream_inner;
+	cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority);
+    // Создаем поток stream_boundaries с наивысшим приоритетом
+	cudaStreamCreateWithPriority(&stream_boundaries, cudaStreamDefault, greatestPriority);
+    // Создаем поток stream_inner с наименьшим приоритетом
+	cudaStreamCreateWithPriority(&stream_inner, cudaStreamDefault, leastPriority);
 
+    // определение количества потоков на блок
+    int threads_in_block{32};
+    dim3 threadPerBlock = dim3(threads_in_block, threads_in_block);
 
-    TYPE *temp_storage = nullptr;
-    uint64_t temp_storage_bytes{0};
+    // определение количества блоков на сетку
+    dim3 blocksPerGrid(n / ((n<threads_in_block*threads_in_block)? n:threads_in_block*threads_in_block), sizeForOne);
 
+    //ошибка
+	TYPE* dev_error;
+    cudaMalloc(&dev_error, sizeof(TYPE));
+
+	// определяем требования к временному хранилищу устройства и выделяем память
+    TYPE *d_temp_storage = nullptr;
+    uint64_t temp_storage_bytes {0};
     // Первый вызов, чтобы предоставить количество байтов, необходимое для временного хранения, необходимого CUB.
-    cub::DeviceReduce::Max(temp_storage, temp_storage_bytes, dev_Atmp, dev_error, size);
-
+    cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, dev_Atmp, dev_error, size);
     // Выделение памяти под буфер
-    CUDA_CHECK(cudaMalloc(&temp_storage, temp_storage_bytes));
+    cudaMalloc(&d_temp_storage, temp_storage_bytes);
 
-    // Граф
-    cudaGraph_t graph;
-    cudaGraphExec_t instance;
 
-    cudaStream_t stream;
-    CUDA_CHECK(cudaStreamCreate(&stream));
+	while(error > tol && iter < iter_max){
 
-    bool isGraphCreated {false};
-
-    while (*error > tol && iter < iter_max)
-    {
         flag = !(iter % n);
 
-        if (!isGraphCreated){
-            CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
-            
-            // меняем местами, чтобы не делать swap с доп переменной. работает быстрее
-            calcAverage<<<blocksPerGrid, threadPerBlock,0,stream>>>(dev_A, dev_Anew, n);
-            calcAverage<<<blocksPerGrid, threadPerBlock,0,stream>>>(dev_Anew, dev_A, n);
-
-            CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
-            CUDA_CHECK(cudaGraphInstantiate(&instance, graph, NULL, NULL, 0));
-            isGraphCreated=true;
-        }
+		// расчет границ
+		calcAverageBounds<<<n, 1, 0, stream_boundaries>>>(dev_A, dev_Anew, n, sizeForOne);
+		// расчет внутренних значений
+		calcAverageInnards<<<threadPerBlock, blocksPerGrid, 0, stream_inner>>>(dev_A, dev_Anew, n, sizeForOne);
+        //синхронизация
+        cudaStreamSynchronize(stream_boundaries);
 
 
-        cudaGraphLaunch(instance, stream);
-
-        if (flag)
-        {
+		if (flag){
             //вычитание матриц
-            calcMatrDiff<<<blocksPerGrid, threadPerBlock,0,stream>>>(dev_A, dev_Anew, dev_Atmp, n);
-            //редукция
-            cub::DeviceReduce::Max(temp_storage, temp_storage_bytes, dev_Atmp, dev_error, size,stream);
+			calcMatrDiff<<<threadPerBlock, blocksPerGrid, 0, stream_inner>>>(dev_A, dev_Anew, dev_Atmp, n, sizeForOne);
+			// Результат сохраняется в dev_error, выделенной памяти d_temp_storage, и размере 
+             //редукция
+            cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, dev_Atmp, dev_error, n * sizeForOne, stream_inner);
+			// Синхронизируем поток stream_inner, чтобы убедиться, что все операции завершены
+            cudaStreamSynchronize(stream_inner);
+            // Выполняем операцию MPI_Allreduce для получения максимального значения ошибки
+			MPI_Allreduce((void*)dev_error, (void*)dev_error, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
             //обновление ошибки на хосте
-            CUDA_CHECK(cudaMemcpy(error, dev_error, sizeof(TYPE), cudaMemcpyDeviceToHost));
-        }
+			cudaMemcpyAsync(&error, dev_error, sizeof(TYPE), cudaMemcpyDeviceToHost, stream_inner);
+		}
+		
+		// верхняя граница
+        // Проверяем, если текущий процесс не является первым (rank != 0), то отправляем верхнюю границу массива dev_Anew 
+        // на предыдущий процесс и одновременно принимаем верхнюю границу от предыдущего процесса.
+        if (rank != 0){
+		    MPI_Sendrecv(dev_Anew + n + 1, n - 2, MPI_DOUBLE, rank - 1, 0, 
+				dev_Anew + 1, n - 2, MPI_DOUBLE, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		}
 
-        iter += 2;
-    }
+		// нижняя граница
+        // Проверяем, если текущий процесс не является последним (rank != nRanks - 1), то отправляем нижнюю границу массива dev_Anew 
+        // на следующий процесс и одновременно принимаем нижнюю границу от следующего процесса.
+		if (rank != nRanks - 1){
+		    MPI_Sendrecv(dev_Anew + (sizeForOne - 2) * n + 1, n - 2, MPI_DOUBLE, rank + 1, 0,
+					dev_Anew + (sizeForOne - 1) * n + 1, 
+					n - 2, MPI_DOUBLE, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		}
+        // Синхронизируем поток stream_inner, чтобы убедиться, что все операции завершены
+		cudaStreamSynchronize(stream_inner);
 
+		// swap
+		TYPE* tmp = dev_A;
+		dev_A = dev_Anew;
+		dev_Anew = tmp;
+
+        iter++;
+	}
+
+    
     if (rank==0) {
-        std::cout << "Iterations: " << iter << std::endl<< "Error: " << *error << std::endl;
+        std::cout << "Iterations: " << iter << std::endl<< "Error: " << error << std::endl;
     }
+
 
     //очистка выделенное памяти
     cudaFree(A);
@@ -256,21 +246,12 @@ void solution(const TYPE tol, const int iter_max, const int n, const int rank, c
     cudaFree(dev_Atmp);
     cudaFree(dev_error);
 
-
-    CUDA_CHECK(cudaStreamDestroy(stream));
-    CUDA_CHECK(cudaGraphDestroy(graph));
+    cudaStreamDestroy(stream_inner)
+    cudaStreamDestroy(stream_boundaries)
 }
 
 
-int main(int argc, char *argv[])
-{
-    auto start = std::chrono::high_resolution_clock::now();
-
-    //инициализация MPI
-    int rank, rankNumber;
-	MPI_Init(&argc, &argv);
-	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-	MPI_Comm_size(MPI_COMM_WORLD, &rankNumber);
+int main(int argc, char* argv[]){
 
     TYPE tol{1e-6};
     int iter_max{1000000}, n{128}; // значения для отладки, по умолчанию инициализировать нулями
@@ -302,14 +283,28 @@ int main(int argc, char *argv[])
         }
     }
 
-    solution(tol, iter_max, n,rank,rankNumber);
+    auto start = std::chrono::high_resolution_clock::now();
+
+    // Объявление и инициализация переменных rank и nRanks для определения ранга и общего числа процессов в MPI.
+    int rank, nRanks;
+    // Инициализация MPI.
+    MPI_Init(&argc, &argv);
+    // Получение ранга текущего процесса.
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    // Получение общего числа процессов.
+    MPI_Comm_size(MPI_COMM_WORLD, &nRanks);
+
+    solution(tol, iter_max, n,rank,nRanks);
     
     MPI_Finalize();
 
+    //подсчёт времени работы программы
     auto end = std::chrono::high_resolution_clock::now() - start;
     long long microseconds = std::chrono::duration_cast<std::chrono::microseconds>(end).count();
 
     if (rank==0) {
         std::cout << "Time (ms): " << microseconds / 1000 << std::endl;
     }
+
+	return 0;
 }
