@@ -6,7 +6,7 @@
 #include <cuda_runtime.h>
 #include <cuda.h>
 #include <cub/cub.cuh>
-
+#include "mpi.h"
 
 // индексация
 #define IDX2C(i, j, ld) (((j) * (ld)) + (i))
@@ -155,9 +155,9 @@ void solution(const TYPE tol, const int iter_max, const int n, const int rank, c
     // Получаем диапазон приоритетов потоков устройства CUDA
 	cudaStream_t stream_boundaries, stream_inner;
 	cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority);
-    // Создаем поток stream_boundaries с наивысшим приоритетом
+    //  поток с наивысшим приоритетом
 	cudaStreamCreateWithPriority(&stream_boundaries, cudaStreamDefault, greatestPriority);
-    // Создаем поток stream_inner с наименьшим приоритетом
+    //  поток с наименьшим приоритетом
 	cudaStreamCreateWithPriority(&stream_inner, cudaStreamDefault, leastPriority);
 
     // определение количества потоков на блок
@@ -198,7 +198,6 @@ void solution(const TYPE tol, const int iter_max, const int n, const int rank, c
 			// Результат сохраняется в dev_error, выделенной памяти d_temp_storage, и размере 
              //редукция
             cub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, dev_Atmp, dev_error, n * sizeForOne, stream_inner);
-			// Синхронизируем поток stream_inner, чтобы убедиться, что все операции завершены
             cudaStreamSynchronize(stream_inner);
             // Выполняем операцию MPI_Allreduce для получения максимального значения ошибки
 			MPI_Allreduce((void*)dev_error, (void*)dev_error, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
@@ -207,22 +206,22 @@ void solution(const TYPE tol, const int iter_max, const int n, const int rank, c
 		}
 		
 		// верхняя граница
-        // Проверяем, если текущий процесс не является первым (rank != 0), то отправляем верхнюю границу массива dev_Anew 
-        // на предыдущий процесс и одновременно принимаем верхнюю границу от предыдущего процесса.
+        // если ранк не 0, то отправляем верхнюю границу массива dev_Anew на предыдущий процесс 
+        // и одновременно принимаем верхнюю границу от предыдущего процесса.
         if (rank != 0){
 		    MPI_Sendrecv(dev_Anew + n + 1, n - 2, MPI_DOUBLE, rank - 1, 0, 
 				dev_Anew + 1, n - 2, MPI_DOUBLE, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		}
 
 		// нижняя граница
-        // Проверяем, если текущий процесс не является последним (rank != nRanks - 1), то отправляем нижнюю границу массива dev_Anew 
-        // на следующий процесс и одновременно принимаем нижнюю границу от следующего процесса.
+        // если ранке не последний, то отправляем нижнюю границу массива dev_Anew на следующий процесс 
+        // и одновременно принимаем нижнюю границу от следующего процесса.
 		if (rank != nRanks - 1){
-		    MPI_Sendrecv(dev_Anew + (sizeForOne - 2) * n + 1, n - 2, MPI_DOUBLE, rank + 1, 0,
-					dev_Anew + (sizeForOne - 1) * n + 1, 
+		    MPI_Sendrecv(dev_Anew + (sizeForOne - 2) * n + 1, n - 2, MPI_DOUBLE, rank + 1, 0,dev_Anew + (sizeForOne - 1) * n + 1, 
 					n - 2, MPI_DOUBLE, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		}
-        // Синхронизируем поток stream_inner, чтобы убедиться, что все операции завершены
+
+        // Синхронизация
 		cudaStreamSynchronize(stream_inner);
 
 		// swap
@@ -246,8 +245,8 @@ void solution(const TYPE tol, const int iter_max, const int n, const int rank, c
     cudaFree(dev_Atmp);
     cudaFree(dev_error);
 
-    cudaStreamDestroy(stream_inner)
-    cudaStreamDestroy(stream_boundaries)
+    cudaStreamDestroy(stream_inner);
+    cudaStreamDestroy(stream_boundaries);
 }
 
 
@@ -285,7 +284,7 @@ int main(int argc, char* argv[]){
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    // Объявление и инициализация переменных rank и nRanks для определения ранга и общего числа процессов в MPI.
+
     int rank, nRanks;
     // Инициализация MPI.
     MPI_Init(&argc, &argv);
